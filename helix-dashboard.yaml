@@ -1,0 +1,207 @@
+---
+# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Provision Infrastructure to pull Fireeye Helix alerts and save them to S3.
+Parameters: 
+  HelixAPISecretName:
+    Description: Enter Secret Manager secret name where Helix API Key is stored
+    Type: String
+  S3Bucket:
+    Description: Enter a S3 bucket prefix
+    Type: String
+  Schedule: 
+    Default: rate(1 day)
+    Description: Enter an Schedule expression example cron(0 7 ? * MON-FRI * ) see https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html
+    Type: String
+  HelixEndpointUrl:
+    Description: Enter the Fireeye Helix api endpoint url
+    Type: String
+Resources:
+  FetchHelixAlerts:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.8
+      Role: !GetAtt Role.Arn
+      Handler: index.lambda_handler
+      Timeout: 300
+      Environment:
+         Variables:
+          APIKEY_SECRET_NAME: !Ref HelixAPISecretName
+          HELIX_ENDPOINT_URL: !Ref HelixEndpointUrl
+          S3_BUCKET_NAME: !Join
+            - "-"
+            - - !Ref S3Bucket
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"
+              - !Ref AWS::Region
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: MIT-0
+          import boto3
+          from datetime import datetime
+          import urllib3
+          import os
+
+          region_name = os.environ['AWS_REGION']
+          secret_name = os.environ['APIKEY_SECRET_NAME']
+          bucket_name = os.environ['S3_BUCKET_NAME']
+          helix_api_url = os.environ['HELIX_ENDPOINT_URL']
+
+          def lambda_handler(event, context):
+
+              now = datetime.now()
+              # Create a Secrets Manager client to fetch API Key from Secrets Manager
+              session = boto3.session.Session()
+              client = session.client(
+                  service_name='secretsmanager',
+                  region_name=region_name
+              )
+              apikey = client.get_secret_value(
+                      SecretId=secret_name
+                  )['SecretString']
+              
+              datestr = now.strftime("%B %d, %Y")
+              apiheader = {'x-fireeye-api-key': apikey}
+              
+              try:
+                  # Call Helix Rest API to fetch the Alerts
+                  http = urllib3.PoolManager()
+                  helixalerts = http.request('GET', 
+                      f'{helix_api_url}?format=csv&query=start:"{datestr}" end:"{datestr}" class=alerts', 
+                      headers=apiheader)   
+              
+                  # Optionally transform the content according to your needs..
+                  
+                  # Create a S3 client to upload the CSV file
+                  s3 = boto3.client('s3')
+                  path = now.strftime("%Y/%m/%d")+'/alerts-'+now.strftime("%H-%M-%S")+'.csv'
+                  response = s3.put_object(
+                      Body=helixalerts.data,
+                      Bucket=bucket_name,
+                      Key=path,
+                  )
+                  print('S3 upload response:', response)
+              except Exception as e:
+                  print('error while fetching the alerts', e)
+                  raise e
+                  
+              return {
+                  'statusCode': 200,
+                  'body': f'Successfully fetched alerts from Helix and uploaded to {path}'
+              }
+
+      Description: Function that fetch Alerts from Helix API
+  permissionForEventsToInvokeFetchHelixAlerts:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt FetchHelixAlerts.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRule.Arn
+
+  HelixAlertsS3Bucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Join
+        - "-"
+        - - !Ref S3Bucket
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId"
+          - !Ref AWS::Region
+      VersioningConfiguration:
+        Status: Enabled
+
+  Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: HelixLambdaPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                - "s3:PutObject"
+                - "s3:PutObjectRetention"
+                - "s3:PutObjectVersionAcl"
+                - "s3:PutObjectAcl"
+                Resource: !Join
+                  - ''
+                  - - !GetAtt HelixAlertsS3Bucket.Arn
+                    - '/*'
+              - Effect: Allow
+                Action:
+                - "secretsmanager:GetSecretValue"
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${HelixAPISecretName}*'
+
+  EventRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule"
+      ScheduleExpression: !Ref Schedule
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: !GetAtt FetchHelixAlerts.Arn
+          Id: "TargetFunctionV1"
+
+Outputs:
+  IAMRoleName:
+    Description: "The IAM role name for Lambda function"
+    Value:
+      Ref: Role
+  LambdaFunction:
+    Description: "Lambda function to fetch FireEye Helix Alerts"
+    Value:
+      Ref: FetchHelixAlerts
+  S3Bucket:
+    Description: "S3 bucket to hold FireEye logs"
+    Value:
+      Ref: HelixAlertsS3Bucket
+  EventBridgeRule:
+    Description: "EventBridge Rule to periodically call Lambda Function"
+    Value:
+      Ref: EventRule
