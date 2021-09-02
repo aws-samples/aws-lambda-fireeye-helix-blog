@@ -1,6 +1,6 @@
 # AWS Blog: Creating Custom Analytics Dashboards with FireEye Helix and Amazon QuickSight
 
-This repository contains sample code for the AWS Blog Post `Creating Custom Analytics Dashboards with FireEye Helix and Amazon QuickSight`. The solution allows you to create custom analytics dashboards with Amazon QuickSight on the threat detection logs collected by FireEye Helix.
+This repository contains sample code for the AWS Blog Post [Creating Custom Analytics Dashboards with FireEye Helix and Amazon QuickSight](https://aws.amazon.com/blogs/architecture/field-notes-creating-custom-analytics-dashboards-with-fireeye-helix-and-amazon-quicksight/). The solution allows you to create custom analytics dashboards with Amazon QuickSight on the threat detection logs collected by FireEye Helix.
 
 ## Solution Overview
 
