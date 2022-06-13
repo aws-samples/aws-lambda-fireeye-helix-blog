@@ -141,6 +141,10 @@ Resources:
           - !Ref AWS::Region
       VersioningConfiguration:
         Status: Enabled
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
 
   Role:
     Type: 'AWS::IAM::Role'
